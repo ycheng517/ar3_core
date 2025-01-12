@@ -22,7 +22,7 @@ hardware_interface::CallbackReturn ARHardwareInterface::on_init(
       info_.hardware_parameters.at("velocity_control_enabled");
   bool velocity_control_enabled =
       velocity_control_p == "True" || velocity_control_p == "true";
-  int baud_rate = 9600;
+  int baud_rate = 38400;
   bool success = driver_.init(ar_model, serial_port, baud_rate,
                               info_.joints.size(), velocity_control_enabled);
   if (!success) {

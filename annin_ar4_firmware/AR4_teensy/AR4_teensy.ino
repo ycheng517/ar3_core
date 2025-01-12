@@ -7,7 +7,7 @@
 #include <map>
 
 // Firmware version
-const char* VERSION = "2.0.0";
+const char* VERSION = "2.0.1";
 
 // Model of the AR4, i.e. mk1, mk2, mk3
 String MODEL = "";
@@ -83,7 +83,8 @@ int ENC_RANGE_STEPS[NUM_JOINTS];
 // speed and acceleration settings
 float JOINT_MAX_SPEED[] = {60.0, 60.0, 60.0, 60.0, 60.0, 60.0};  // deg/s
 float JOINT_MAX_ACCEL[] = {30.0, 30.0, 30.0, 30.0, 30.0, 30.0};  // deg/s^2
-char JOINT_NAMES[] = {'A', 'B', 'C', 'D', 'E', 'F'};
+char VARIABLE_NAMES[] = {'A', 'B', 'C', 'D', 'E', 'F',
+                         'G', 'H', 'I', 'J', 'K', 'L'};
 
 bool estop_pressed = false;
 
@@ -150,7 +151,7 @@ void setup() {
   pinMode(ESTOP_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(ESTOP_PIN), estopPressed, FALLING);
 
-  Serial.begin(9600);
+  Serial.begin(38400);
 }
 
 void setupSteppersMK1() {
@@ -262,7 +263,7 @@ void jointPosToEncSteps(double* jointPos, int* encSteps) {
 String JointPosToString(double* jointPos) {
   String out;
   for (int i = 0; i < NUM_JOINTS; ++i) {
-    out += JOINT_NAMES[i];
+    out += VARIABLE_NAMES[i];
     out += String(jointPos[i], 6);
   }
   return out;
@@ -272,38 +273,58 @@ String JointVelToString(double* lastVelocity) {
   String out;
 
   for (int i = 0; i < NUM_JOINTS; ++i) {
-    out += JOINT_NAMES[i];
+    out += VARIABLE_NAMES[i];
     out += String(lastVelocity[i], 6);
   }
 
   return out;
 }
 
-void ParseMessage(String& inData, double* cmdJointPos) {
+void ParseMessage(String& inData, double* cmdJointPos, int startIdx = 0) {
   for (int i = 0; i < NUM_JOINTS; i++) {
     bool lastJoint = i == NUM_JOINTS - 1;
-    int msgIdxJ_S, msgIdxJ_E = 0;
-    msgIdxJ_S = inData.indexOf(JOINT_NAMES[i]);
-    msgIdxJ_E = (lastJoint) ? -1 : inData.indexOf(JOINT_NAMES[i + 1]);
+    int msgIdxJ_S = inData.indexOf(VARIABLE_NAMES[i + startIdx]);
     if (msgIdxJ_S == -1) {
-      Serial.printf("ER: panic, missing joint %c\n", JOINT_NAMES[i]);
+      Serial.printf("ER: panic, missing variable %c\n",
+                    VARIABLE_NAMES[i + startIdx]);
       return;
     }
-    if (msgIdxJ_E != -1) {
-      cmdJointPos[i] = inData.substring(msgIdxJ_S + 1, msgIdxJ_E).toFloat();
+
+    int msgIdxJ_E;
+    if (!lastJoint) {
+      msgIdxJ_E = inData.indexOf(VARIABLE_NAMES[i + startIdx + 1]);
     } else {
-      cmdJointPos[i] = inData.substring(msgIdxJ_S + 1).toFloat();
+      msgIdxJ_E = inData.length();
     }
+
+    cmdJointPos[i] = inData.substring(msgIdxJ_S + 1, msgIdxJ_E).toFloat();
   }
 }
 
-void MoveVelocity(String inData) {
+void MoveVelocity(String inData, int* motorSteps) {
   double cmdJointVel[NUM_JOINTS];
-  ParseMessage(inData, cmdJointVel);
+  double cmdJointPos[NUM_JOINTS];
 
+  double curJointPos[NUM_JOINTS];
+  encStepsToJointPos(motorSteps, curJointPos);
+
+  // Parse velocity commands (A-F)
+  ParseMessage(inData, cmdJointVel, 0);
+  // Parse position commands (G-L)
+  ParseMessage(inData, cmdJointPos, NUM_JOINTS);
+
+  double tol = 0.001;
   for (int i = 0; i < NUM_JOINTS; i++) {
+    // HACK to improve tracking performance: if position is getting away,
+    // adjust velocity to catch up
+    if ((abs(cmdJointVel[i]) > 0) &&
+        (abs(cmdJointPos[i] - curJointPos[i]) > tol)) {
+      cmdJointVel[i] += 50 * (cmdJointPos[i] - curJointPos[i]);
+    }
+
+    // clip joint velocity by max speed
     if (abs(cmdJointVel[i]) > JOINT_MAX_SPEED[i]) {
-      Serial.printf("DB: joint %c speed %f > %f, clipping.\n", JOINT_NAMES[i],
+      Serial.printf("DB: joint %i speed %f > %f, clipping.\n", i + 1,
                     cmdJointVel[i], JOINT_MAX_SPEED[i]);
       cmdJointVel[i] = sgn(cmdJointVel[i]) * JOINT_MAX_SPEED[i];
     }
@@ -315,7 +336,6 @@ void MoveVelocity(String inData) {
 }
 
 void MoveTo(const int* cmdSteps, int* motorSteps) {
-  setAllMaxSpeeds();
   for (int i = 0; i < NUM_JOINTS; ++i) {
     int diffEncSteps = cmdSteps[i] - motorSteps[i];
     if (abs(diffEncSteps) > 2) {
@@ -331,8 +351,8 @@ void MoveTo(String inData, int* motorSteps) {
 
   for (int i = 0; i < NUM_JOINTS; i++) {
     if (abs(cmdJointPos[i] > 380.0)) {
-      Serial.printf("ER: panic, joint %c value %f out of range\n",
-                    JOINT_NAMES[i], cmdJointPos[i]);
+      Serial.printf("ER: panic, joint %i value %f out of range\n", i + 1,
+                    cmdJointPos[i]);
       return;
     }
   }
@@ -360,10 +380,12 @@ bool AtPosition(const int* targetMotorSteps, const int* currMotorSteps,
   return allDone;
 }
 
-void setAllMaxSpeeds() {
+void setAllMaxSpeedAndAccel() {
   for (int i = 0; i < NUM_JOINTS; ++i) {
     stepperJoints[i].setMaxSpeed(JOINT_MAX_SPEED[i] *
                                  MOTOR_STEPS_PER_DEG[MODEL][i]);
+    stepperJoints[i].setAcceleration(JOINT_MAX_ACCEL[i] *
+                                     MOTOR_STEPS_PER_DEG[MODEL][i]);
   }
 }
 
@@ -487,13 +509,6 @@ bool doCalibrationRoutine(String& outputMsg) {
     return false;
   }
 
-  // restore original max speed
-  //
-  for (int i = 0; i < NUM_JOINTS; ++i) {
-    stepperJoints[i].setMaxSpeed(JOINT_MAX_SPEED[i] *
-                                 MOTOR_STEPS_PER_DEG[MODEL][i]);
-  }
-
   // return to original position
   unsigned long startTime = millis();
   int curMotorSteps[NUM_JOINTS];
@@ -510,6 +525,9 @@ bool doCalibrationRoutine(String& outputMsg) {
       safeRun(stepperJoints[i]);
     }
   }
+
+  // restore original max speed and acceleration
+  setAllMaxSpeedAndAccel();
 
   // calibration done, send calibration values
   // N.B. calibration values aren't used right now
@@ -628,7 +646,7 @@ void stateTRAJ() {
           }
         }
 
-        MoveVelocity(inData);
+        MoveVelocity(inData, curMotorSteps);
 
         // update the host about estop state
         String msg = String("ES") + estop_pressed;
@@ -679,8 +697,6 @@ void stateERR() {
 }
 
 void loop() {
-  STATE = STATE_TRAJ;
-
   switch (STATE) {
     case STATE_ERR:
       stateERR();
