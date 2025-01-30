@@ -4,7 +4,7 @@
 #include <stdexcept>
 #include <thread>
 
-#define FW_VERSION "2.0.0"
+#define FW_VERSION "2.0.1"
 
 namespace annin_ar4_driver {
 
@@ -84,6 +84,10 @@ void TeensyDriver::update(std::vector<double>& pos_commands,
     for (int i = 0; i < num_joints_; ++i) {
       outMsg += 'A' + i;
       outMsg += std::to_string(vel_commands[i]);
+    }
+    for (int i = 0; i < num_joints_; ++i) {
+      outMsg += 'A' + i + num_joints_;
+      outMsg += std::to_string(pos_commands[i]);
     }
   } else {
     outMsg += "MT";
